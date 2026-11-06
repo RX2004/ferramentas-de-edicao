@@ -35,10 +35,15 @@ O script pergunta a pasta de origem e a de destino.
 
 **O que faz:** recebe um PDF escaneado (só imagem) e cria `nome_pesquisavel.pdf`, com uma camada de texto
 invisível por cima — o visual não muda, mas agora dá para **buscar (Ctrl+F), selecionar e copiar** o texto.
+- Só faz OCR nas páginas escaneadas: páginas que já têm texto digital ficam intactas (sem texto duplicado)
+- Escolha o idioma: `por` (padrão), `eng`, ou os dois juntos com `por+eng`
+- Mensagens de erro claras (PDF com senha, arquivo aberto em outro programa, idioma não instalado…)
+  e código de saída 1 quando falha, para usar em lote ou em outros scripts
 
 ```bash
-pip install ocrmypdf          # requer o Tesseract com o idioma português instalado
+pip install ocrmypdf          # requer o Tesseract (com o idioma português) e o Ghostscript instalados
 python ocr-pdf/ocr_pdf.py "documento.pdf"
+python ocr-pdf/ocr_pdf.py "documento.pdf" por+eng
 ```
 
 ---
