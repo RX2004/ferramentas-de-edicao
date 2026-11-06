@@ -1,0 +1,14 @@
+# credenciais e login — nunca publicar
+.env
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# saídas
+*.mp3
+*_pesquisavel.pdf
+*.part

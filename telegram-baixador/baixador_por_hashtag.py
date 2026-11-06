@@ -1,0 +1,236 @@
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import asyncio
+from pathlib import Path
+
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+from telethon.tl.types import Channel
+
+# --- CONFIGURAÇÕES ---
+# As credenciais NUNCA ficam no código: vêm de variáveis de ambiente ou de um
+# arquivo .env ao lado do script (veja .env.exemplo). Crie as suas em https://my.telegram.org
+def carregar_env(arquivo=Path(__file__).with_name('.env')):
+    """Lê um .env simples (CHAVE=valor) sem precisar de bibliotecas extras."""
+    if arquivo.exists():
+        for linha in arquivo.read_text(encoding='utf-8').splitlines():
+            linha = linha.strip()
+            if linha and not linha.startswith('#') and '=' in linha:
+                chave, valor = linha.split('=', 1)
+                os.environ.setdefault(chave.strip(), valor.strip().strip('"\''))
+
+
+carregar_env()
+try:
+    API_ID = int(os.environ['TELEGRAM_API_ID'])
+    API_HASH = os.environ['TELEGRAM_API_HASH']
+except (KeyError, ValueError):
+    raise SystemExit("❌ Defina TELEGRAM_API_ID e TELEGRAM_API_HASH (veja o arquivo .env.exemplo).")
+
+SESSION_NAME = os.environ.get('TELEGRAM_SESSAO', 'baixador_por_hashtag')
+# A sessão (seu login) fica fora da pasta do projeto, em ~/.telegram_downloader,
+# para nunca ir parar no Git nem em pastas sincronizadas na nuvem.
+PASTA_CONFIG = Path.home() / '.telegram_downloader'
+
+PASTA_DOWNLOAD = Path(os.environ.get('TELEGRAM_PASTA_DOWNLOAD', Path.home() / 'Downloads' / 'telegram_midias'))
+LIMITE_CANAIS = 50
+# ---------------------
+
+CARACTERES_INVALIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def caminho_sessao():
+    """Retorna o caminho do arquivo de sessão, fora da pasta do projeto."""
+    PASTA_CONFIG.mkdir(parents=True, exist_ok=True)
+    return str(PASTA_CONFIG / SESSION_NAME)
+
+
+def nome_seguro(texto):
+    """
+    Remove caracteres que o Windows não aceita em nomes de arquivo.
+    """
+    return CARACTERES_INVALIDOS.sub('_', texto).strip(' .') or 'sem_nome'
+
+
+def expandir_tags(entrada):
+    """
+    Transforma a entrada do usuário em lista de tags.
+    Aceita intervalos: '#P01-P05' vira #P01 #P02 #P03 #P04 #P05.
+    """
+    tags = []
+    for item in entrada.replace(',', ' ').split():
+        item = item.lstrip('#')
+        intervalo = re.fullmatch(r'([^\d\s-]*)(\d+)-#?\1?(\d+)', item)
+        if intervalo:
+            prefixo, inicio, fim = intervalo.groups()
+            largura = len(inicio)
+            for n in range(int(inicio), int(fim) + 1):
+                tags.append(f"#{prefixo}{n:0{largura}d}")
+        elif item:
+            tags.append(f"#{item}")
+    return tags
+
+
+def eh_video(mensagem):
+    if mensagem.video:
+        return True
+    mime = (mensagem.document.mime_type or '') if mensagem.document else ''
+    return mime.startswith('video')
+
+
+def exibir_progresso(recebido, total):
+    """
+    Função para exibir a barra de progresso do download.
+    """
+    if total > 0:
+        percentual = 100 * recebido / total
+        print(f"    Baixando... [{percentual:5.1f}%] {recebido / 1048576:.1f}/{total / 1048576:.1f} MB", end='\r')
+
+
+async def baixar_tag(client, entidade, tag):
+    """
+    Procura e baixa o vídeo de uma tag. Retorna 'baixado', 'existe' ou 'nao_encontrado'.
+    """
+    nome_base = nome_seguro(tag[1:])
+
+    # Verifica se já existe (qualquer extensão, ignorando downloads incompletos)
+    for existente in PASTA_DOWNLOAD.glob(f"{nome_base}.*"):
+        if existente.suffix != '.part':
+            print(f"  ✅ Arquivo '{existente.name}' já existe. Pulando.")
+            return 'existe'
+
+    # Tag exata: '#P1' não pode casar com '#P10'
+    padrao_tag = re.compile(re.escape(tag) + r'(?![\w])', re.IGNORECASE)
+
+    async for mensagem in client.iter_messages(entidade, search=tag, limit=10):
+        if not (mensagem.text and padrao_tag.search(mensagem.text) and eh_video(mensagem)):
+            continue
+
+        extensao = (mensagem.file.ext if mensagem.file else None) or '.mp4'
+        caminho_final = PASTA_DOWNLOAD / f"{nome_base}{extensao}"
+        caminho_temp = caminho_final.with_name(caminho_final.name + '.part')
+
+        print(f"  -> Vídeo encontrado! Baixando '{caminho_final.name}'...")
+        # Baixa para .part e só renomeia no fim, assim um download interrompido
+        # não é confundido com um arquivo completo
+        await client.download_media(mensagem.media, file=str(caminho_temp), progress_callback=exibir_progresso)
+        caminho_temp.replace(caminho_final)
+        print(f"\n  📥 Download de '{caminho_final.name}' concluído.")
+        return 'baixado'
+
+    print(f"  ❌ Nenhum vídeo encontrado para a tag {tag} (ou sem arquivo de vídeo na mensagem).")
+    return 'nao_encontrado'
+
+
+async def escolher_canal(client):
+    """
+    Lista os canais recentes e retorna a entidade escolhida (ou None).
+    """
+    print("Buscando sua lista de canais... (Aguarde)")
+
+    canais = []
+    async for dialog in client.iter_dialogs(limit=LIMITE_CANAIS):
+        if isinstance(dialog.entity, Channel) and dialog.is_channel:
+            canais.append((dialog.title, dialog.entity))
+
+    if not canais:
+        print(f"🟡 Nenhum canal encontrado nos seus {LIMITE_CANAIS} chats recentes.")
+    else:
+        print("--- 🔎 Escolha um canal da lista ---")
+        for i, (titulo, _) in enumerate(canais):
+            print(f"  [{i+1}] {titulo}")
+
+    print("-" * 30)
+    print("👉 Ou cole o link/username (ex: @canal_xyz ou https://t.me/...)")
+
+    canal_input = input("\nDigite o NÚMERO ou o LINK/USERNAME: ").strip()
+
+    if not canal_input:
+        print("❌ Nenhuma opção inserida. Encerrando.")
+        return None
+
+    if canal_input.isdigit():
+        indice = int(canal_input) - 1
+        if not 0 <= indice < len(canais):
+            print("❌ Número inválido. Fora da lista.")
+            return None
+        print(f"🔎 Acessando canal: '{canais[indice][0]}'")
+        return canais[indice][1]
+
+    print("🔎 Tentando acessar por link/username...")
+    try:
+        entidade = await client.get_entity(canal_input)
+    except (ValueError, TypeError) as e:
+        print(f"❌ Não foi possível acessar o canal: {e}")
+        return None
+    print(f"🔎 Acessando canal: '{getattr(entidade, 'title', 'Nome não disponível')}'")
+    return entidade
+
+
+async def main():
+    """
+    Pede uma lista de hashtags e baixa os vídeos correspondentes do canal escolhido.
+    """
+    try:
+        PASTA_DOWNLOAD.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"❌ Erro ao criar o diretório: {e}")
+        return
+
+    async with TelegramClient(caminho_sessao(), API_ID, API_HASH) as client:
+        print("✅ Conectado com sucesso ao Telegram.")
+        print("-" * 30)
+
+        entidade = await escolher_canal(client)
+        if entidade is None:
+            return
+        print("-" * 30)
+
+        while True:
+            print("\n" + "="*40)
+            print("👉 Digite as hashtags separadas por espaço (aceita intervalo: #P01-P10).")
+            entrada_usuario = input("Exemplo: #P01 #P02 #P05 (ou 'sair'): ").strip()
+
+            if not entrada_usuario:
+                continue
+            if entrada_usuario.lower() == 'sair':
+                print("👋 Encerrando o script. Até mais!")
+                break
+
+            tags = expandir_tags(entrada_usuario)
+            print(f"\n📋 Processando {len(tags)} itens...")
+
+            resultados = {'baixado': [], 'existe': [], 'nao_encontrado': [], 'erro': []}
+
+            for tag in tags:
+                print(f"\n🔎 [Tag: {tag}] Procurando...")
+                # Um erro em uma tag não interrompe as demais
+                while True:
+                    try:
+                        resultados[await baixar_tag(client, entidade, tag)].append(tag)
+                        break
+                    except FloodWaitError as e:
+                        print(f"\n  ⏳ Limite do Telegram atingido. Aguardando {e.seconds}s...")
+                        await asyncio.sleep(e.seconds + 1)
+                    except Exception as e:
+                        print(f"\n  ❌ Erro ao processar {tag}: {e}")
+                        resultados['erro'].append(tag)
+                        break
+
+            print("\n" + "-" * 40)
+            print("📊 Resumo:")
+            print(f"  📥 Baixados:        {len(resultados['baixado'])} {' '.join(resultados['baixado'])}")
+            print(f"  ✅ Já existiam:     {len(resultados['existe'])} {' '.join(resultados['existe'])}")
+            print(f"  ❌ Não encontrados: {len(resultados['nao_encontrado'])} {' '.join(resultados['nao_encontrado'])}")
+            print(f"  ⚠️  Com erro:        {len(resultados['erro'])} {' '.join(resultados['erro'])}")
+
+    print("\n\n🎉 Processo finalizado!")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\n👋 Script interrompido pelo usuário.")
