@@ -7,7 +7,7 @@ Cada um resolve uma tarefa que eu fazia à mão, arquivo por arquivo.
 |---|---|---|
 | [**Extrator de áudio em lote**](#-extrator-de-áudio-em-lote) | Tirar o áudio (MP3) de dezenas de vídeos para transcrever, legendar ou reaproveitar | ~2 min por vídeo → **1 hora vira poucos minutos** numa pasta com 30 vídeos |
 | [**OCR de PDF**](#-ocr-de-pdf) | PDFs escaneados não deixam buscar nem copiar texto | Evita redigitar trechos; um PDF de 100 páginas fica pesquisável **em ~1 a 3 min** |
-| [**Baixador do Telegram por hashtag**](#-baixador-do-telegram-por-hashtag) | Baixar vídeos específicos de um canal grande, um por um, e organizar os nomes | ~1 min por vídeo (achar, baixar, renomear) → **dezenas de vídeos de uma vez**, já nomeados |
+| [**Baixador do Telegram por hashtag**](#-baixador-do-telegram-por-hashtag) | Baixar vídeos específicos (ou todos) de um canal ou grupo, um por um, e organizar os nomes | ~1 min por vídeo (achar, baixar, renomear) → **dezenas de vídeos de uma vez**, já nomeados |
 
 > As estimativas são do meu uso real; o ganho depende do tamanho dos arquivos e do computador.
 
@@ -51,8 +51,19 @@ python ocr-pdf/ocr_pdf.py "documento.pdf" por+eng
 ## 📥 Baixador do Telegram por hashtag
 `telegram-baixador/baixador_por_hashtag.py`
 
-**O que faz:** em canais que organizam os vídeos por hashtag (`#P01`, `#P02`…), ele busca e baixa só os
-que você pedir, já com o nome da hashtag.
+**O que faz:** depois de escolher o canal ou grupo, você escolhe o modo:
+
+**[1] Por hashtag.** Em canais que organizam os vídeos por hashtag (`#P01`, `#P02`…), ele busca e baixa
+só os que você pedir, já com o nome da hashtag.
+
+**[2] Todos os vídeos.** Baixa todos os vídeos do canal ou grupo, do mais antigo ao mais novo, numa pasta
+com o nome do grupo.
+- Pega também os vídeos enviados "como arquivo" (e ignora PDFs, fotos e outros arquivos)
+- Antes de começar, mostra quantos vídeos são, quantos já foram baixados e o tamanho total, e pede confirmação
+- Nomes na ordem de postagem: `000123_Aula 01.mp4` (número da mensagem + nome original ou legenda)
+- Um vídeo com erro não para os outros; rode de novo para baixar só o que faltou
+
+**Nos dois modos:**
 - **Intervalos:** digite `#P01-P20` e ele entende `#P01, #P02 … #P20`
 - **Tag exata:** `#P1` não baixa `#P10` por engano
 - **Download seguro:** baixa primeiro para `.part` e só renomeia no fim — um download interrompido nunca
