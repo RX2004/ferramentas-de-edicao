@@ -11,6 +11,7 @@ Os dois retomam de onde pararam: o que já foi baixado é pulado.
 import os
 import re
 import sys
+import json
 import asyncio
 from pathlib import Path
 
@@ -114,6 +115,57 @@ def glob_seguro(texto):
     return re.sub(r'([\[\]])', r'[\1]', texto)
 
 
+class RegistroDeBaixados:
+    """
+    Lembra quais vídeos já foram baixados, pela identidade do arquivo no Telegram,
+    não pelo nome. Assim o mesmo vídeo não é baixado de novo mesmo que:
+      - você escolha o mesmo grupo outra vez, ou mova/renomeie os arquivos baixados;
+      - ele tenha sido postado duas vezes no grupo, ou encaminhado de outro grupo.
+
+    Fica em <pasta de download>/.videos_baixados.json. Para baixar tudo de novo,
+    apague esse arquivo.
+    """
+
+    def __init__(self, arquivo):
+        self.arquivo = Path(arquivo)
+        try:
+            self.dados = json.loads(self.arquivo.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            self.dados = {}
+
+    @staticmethod
+    def chaves(mensagem):
+        """
+        id:...  - o mesmo arquivo no Telegram (inclusive quando é encaminhado)
+        tam:... - tamanho + duração idênticos (o mesmo vídeo reenviado do zero)
+        """
+        chaves = []
+        documento = getattr(mensagem, 'document', None)
+        if documento is not None and getattr(documento, 'id', None):
+            chaves.append(f"id:{documento.id}")
+        arquivo = getattr(mensagem, 'file', None)
+        tamanho = getattr(arquivo, 'size', None) if arquivo else None
+        duracao = getattr(arquivo, 'duration', None) if arquivo else None
+        if tamanho and duracao:  # só tamanho não basta: dois vídeos podem ter o mesmo tamanho
+            chaves.append(f"tam:{tamanho}:{duracao}")
+        return chaves
+
+    def ja_baixado(self, mensagem):
+        """Devolve o nome com que o vídeo foi salvo antes, ou None."""
+        for chave in self.chaves(mensagem):
+            if chave in self.dados:
+                return self.dados[chave]
+        return None
+
+    def adicionar(self, mensagem, caminho):
+        for chave in self.chaves(mensagem):
+            self.dados[chave] = str(caminho)
+        temporario = self.arquivo.with_name(self.arquivo.name + '.tmp')
+        self.arquivo.parent.mkdir(parents=True, exist_ok=True)
+        temporario.write_text(json.dumps(self.dados, ensure_ascii=False, indent=1), encoding='utf-8')
+        temporario.replace(self.arquivo)  # grava de uma vez: nunca fica um registro pela metade
+
+
 def exibir_progresso(recebido, total):
     """
     Função para exibir a barra de progresso do download.
@@ -146,10 +198,15 @@ async def com_espera_do_telegram(acao):
 
 # ----------------------------------------------------------- modo 1: por hashtag
 
-async def baixar_tag(client, entidade, tag):
+def abrir_registro():
+    return RegistroDeBaixados(PASTA_DOWNLOAD / '.videos_baixados.json')
+
+
+async def baixar_tag(client, entidade, tag, registro=None):
     """
     Procura e baixa o vídeo de uma tag. Retorna 'baixado', 'existe' ou 'nao_encontrado'.
     """
+    registro = registro or abrir_registro()
     nome_base = nome_seguro(tag[1:])
 
     existente = ja_existe(PASTA_DOWNLOAD, nome_base)
@@ -164,9 +221,15 @@ async def baixar_tag(client, entidade, tag):
         if not (mensagem.text and padrao_tag.search(mensagem.text) and eh_video(mensagem)):
             continue
 
+        anterior = registro.ja_baixado(mensagem)
+        if anterior:
+            print(f"  🔁 Esse vídeo já foi baixado antes, como '{Path(anterior).name}'. Pulando.")
+            return 'existe'
+
         caminho_final = PASTA_DOWNLOAD / f"{nome_base}{extensao_de(mensagem)}"
         print(f"  -> Vídeo encontrado! Baixando '{caminho_final.name}'...")
         await baixar_midia(client, mensagem, caminho_final)
+        registro.adicionar(mensagem, caminho_final)
         return 'baixado'
 
     print(f"  ❌ Nenhum vídeo encontrado para a tag {tag} (ou sem arquivo de vídeo na mensagem).")
@@ -174,6 +237,7 @@ async def baixar_tag(client, entidade, tag):
 
 
 async def modo_hashtag(client, entidade):
+    registro = abrir_registro()
     while True:
         print("\n" + "="*40)
         print("👉 Digite as hashtags separadas por espaço (aceita intervalo: #P01-P10).")
@@ -193,7 +257,7 @@ async def modo_hashtag(client, entidade):
             print(f"\n🔎 [Tag: {tag}] Procurando...")
             # Um erro em uma tag não interrompe as demais
             try:
-                resultado = await com_espera_do_telegram(lambda: baixar_tag(client, entidade, tag))
+                resultado = await com_espera_do_telegram(lambda: baixar_tag(client, entidade, tag, registro))
                 resultados[resultado].append(tag)
             except Exception as e:
                 print(f"\n  ❌ Erro ao processar {tag}: {e}")
@@ -241,7 +305,33 @@ def tamanho_legivel(total_bytes):
         total_bytes /= 1024
 
 
-async def modo_todos(client, entidade):
+def separar_pendentes(videos, pasta, registro):
+    """
+    Divide os vídeos em: pendentes, já baixados antes e repetidos dentro do próprio grupo.
+    Vídeos baixados por versões antigas do script (sem registro) são reconhecidos pelo
+    nome do arquivo e entram no registro.
+    """
+    pendentes, ja_baixados, repetidos = [], [], []
+    vistos = set()
+    for mensagem in videos:
+        chaves = registro.chaves(mensagem)
+        if registro.ja_baixado(mensagem):
+            ja_baixados.append(mensagem)
+        elif vistos.intersection(chaves):
+            repetidos.append(mensagem)
+        else:
+            existente = ja_existe(pasta, nome_do_video(mensagem))
+            if existente:
+                registro.adicionar(mensagem, existente)
+                ja_baixados.append(mensagem)
+            else:
+                pendentes.append(mensagem)
+        vistos.update(chaves)
+    return pendentes, ja_baixados, repetidos
+
+
+async def modo_todos(client, entidade, registro=None):
+    registro = registro or abrir_registro()
     titulo = getattr(entidade, 'title', None) or 'canal'
     pasta = PASTA_DOWNLOAD / nome_seguro(titulo)
 
@@ -251,12 +341,14 @@ async def modo_todos(client, entidade):
         print("🟡 Nenhum vídeo encontrado neste canal/grupo.")
         return
 
-    pendentes = [m for m in videos if not ja_existe(pasta, nome_do_video(m))]
+    pendentes, ja_baixados, repetidos = separar_pendentes(videos, pasta, registro)
     tamanho = sum((m.file.size or 0) for m in pendentes if m.file)
 
     print(f"\n🎬 {len(videos)} vídeo(s) encontrado(s) em '{titulo}'.")
-    if len(pendentes) < len(videos):
-        print(f"   ✅ {len(videos) - len(pendentes)} já baixado(s) antes, serão pulados.")
+    if ja_baixados:
+        print(f"   ✅ {len(ja_baixados)} já baixado(s) antes, serão pulados.")
+    if repetidos:
+        print(f"   🔁 {len(repetidos)} repetido(s) no próprio grupo (o mesmo vídeo postado de novo), serão pulados.")
     if not pendentes:
         print("   Nada novo para baixar.")
         return
@@ -274,6 +366,7 @@ async def modo_todos(client, entidade):
         print(f"\n[{n}/{len(pendentes)}] {caminho_final.name}")
         try:
             await com_espera_do_telegram(lambda: baixar_midia(client, mensagem, caminho_final))
+            registro.adicionar(mensagem, caminho_final)
             baixados += 1
         except Exception as e:  # um vídeo com erro não interrompe os demais
             print(f"\n  ❌ Erro: {e}")
@@ -282,7 +375,8 @@ async def modo_todos(client, entidade):
     print("\n" + "-" * 40)
     print("📊 Resumo:")
     print(f"  📥 Baixados:    {baixados}")
-    print(f"  ✅ Já existiam: {len(videos) - len(pendentes)}")
+    print(f"  ✅ Já existiam: {len(ja_baixados)}")
+    print(f"  🔁 Repetidos:   {len(repetidos)}")
     print(f"  ⚠️  Com erro:    {len(erros)}")
     for nome in erros:
         print(f"     - {nome}")

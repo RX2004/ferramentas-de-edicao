@@ -12,3 +12,4 @@ __pycache__/
 *.mp3
 *_pesquisavel.pdf
 *.part
+.videos_baixados.json

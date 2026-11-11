@@ -62,6 +62,10 @@ com o nome do grupo.
 - Antes de começar, mostra quantos vídeos são, quantos já foram baixados e o tamanho total, e pede confirmação
 - Nomes na ordem de postagem: `000123_Aula 01.mp4` (número da mensagem + nome original ou legenda)
 - Um vídeo com erro não para os outros; rode de novo para baixar só o que faltou
+- **Não baixa vídeos repetidos:** reconhece o vídeo pela identidade do arquivo no Telegram, não pelo nome.
+  Pula o mesmo vídeo postado duas vezes no grupo, encaminhado de outro grupo ou reenviado, e não baixa
+  de novo o que você já baixou, mesmo que tenha movido ou renomeado os arquivos
+  (o registro fica em `.videos_baixados.json`, na pasta de download; apague-o para baixar tudo de novo)
 
 **Nos dois modos:**
 - **Intervalos:** digite `#P01-P20` e ele entende `#P01, #P02 … #P20`
